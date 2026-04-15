@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"distributed-editor/internal/fsm"
+	"distributed-editor/internal/ot"
 	"distributed-editor/internal/server"
 )
 
@@ -64,7 +65,9 @@ func main() {
 	)
 
 	// ── Build the FSM ─────────────────────────────────────────────────────────
-	sm := fsm.NewDocumentStateMachine(*initText, logger)
+	// The state machine always starts empty. If init-text is provided, the leader
+	// will propose it as an initial log entry so it replicates correctly to followers.
+	sm := fsm.NewDocumentStateMachine("", logger)
 
 	// ── Start Raft ────────────────────────────────────────────────────────────
 	raftCfg := server.RaftConfig{
@@ -80,6 +83,29 @@ func main() {
 		os.Exit(1)
 	}
 	defer rn.Shutdown()
+
+	// If we are bootstrapping and have initial text, we must propose it as a Raft
+	// entry so followers receive it. We cannot just set it in the local FSM.
+	if *bootstrap && *initText != "" {
+		go func() {
+			logger.Info("waiting to become leader to propose initial text...")
+			for !rn.IsLeader() {
+				time.Sleep(100 * time.Millisecond)
+			}
+			// Submit an insert changeset mapping length 0 to len(initText)
+			entry := fsm.RaftLogEntry{
+				ClientID:     "system-bootstrap",
+				SubmissionID: 1,
+				BaseRev:      0,
+				Changeset:    ot.MakeInsert(0, 0, *initText),
+			}
+			data, err := fsm.MarshalEntry(entry)
+			if err == nil {
+				rn.Raft.Apply(data, 5*time.Second)
+				logger.Info("proposed initial text to cluster")
+			}
+		}()
+	}
 
 	// ── Build the server Node and HTTP mux ────────────────────────────────────
 	// wsLeaderAddr is filled with the WS address of the leader — we derive it

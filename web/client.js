@@ -284,12 +284,12 @@ function diffToChangeset(oldText, newText) {
 // ─────────────────────────────────────────────────────────────────
 
 let state = {
-  clientId: null,         // UUID assigned on first load (localStorage)
+  clientId: localStorage.getItem('collab-editor-client-id') || null,
   A: null,               // Changeset: last server-acknowledged state
   X: null,               // Changeset: submitted, awaiting ACK
   Y: null,               // Changeset: local, unsubmitted
   serverRev: 0,          // The revision A is based on
-  nextSubmissionId: 0,   // Monotonically increasing per client
+  nextSubmissionId: parseInt(localStorage.getItem('collab-editor-submission-id') || '0', 10),
   waitingForAck: false,  // True while X is in-flight
 
   // The text the server last confirmed (for diffing).
@@ -305,20 +305,18 @@ let submitTimer = null;    // 500ms submission interval
 // Connection management
 // ─────────────────────────────────────────────────────────────────
 
-function getOrCreateClientId() {
-  let id = localStorage.getItem('collab-editor-client-id');
-  if (!id) {
-    id = 'client-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
-    localStorage.setItem('collab-editor-client-id', id);
-  }
-  return id;
-}
 
 function connectToServer() {
   const addr = document.getElementById('server-input').value.trim();
   if (!addr) return;
 
-  state.clientId = getOrCreateClientId();
+  if (!state.clientId) {
+    state.clientId = 'client-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now();
+    localStorage.setItem('collab-editor-client-id', state.clientId);
+    state.nextSubmissionId = 0;
+    localStorage.setItem('collab-editor-submission-id', '0');
+  }
+
   document.getElementById('client-id-display').textContent = state.clientId.slice(0, 16) + '…';
   document.getElementById('server-addr').textContent = addr;
 
@@ -384,35 +382,37 @@ function handleConnectAck(payload) {
   const { head_text, head_rev, catch_up } = payload;
   log('info', `CONNECT_ACK: head_rev=${head_rev}, catch_up=${catch_up ? catch_up.length : 0} revisions`);
 
-  // If this is a reconnect, we had X and Y locally. X was never ACKed.
-  // We reset to server state and will re-submit X next tick.
-  // For simplicity, on reconnect we discard X/Y (they'll be resubmitted from diff).
   const n = head_text.length;
-  state.A = { old_len: 0, new_len: n, ops: n === 0 ? [] : [{ op: 'insert', chars: head_text }] };
-  state.X = identity(n);
-  state.Y = identity(n);
-  state.serverRev = head_rev;
-  state.waitingForAck = false;
-  state.baseText = head_text;
-  state.editorText = head_text;
 
-  // Apply catch-up revisions to acknowledge any revisions we missed.
-  if (catch_up && catch_up.length > 0) {
-    for (const rec of catch_up) {
-      try {
-        state.baseText = applyChangeset(state.baseText, rec.changeset);
-      } catch (e) {
-        log('error', 'catch-up apply failed: ' + e.message);
+  if (state.serverRev === 0) {
+    // Case 1: First connection. The server's head_text is the source of truth.
+    state.baseText = head_text;
+    state.editorText = head_text;
+    state.serverRev = head_rev;
+  } else {
+    // Case 2: Reconnect. We apply catch-up revisions to our EXISTING baseText.
+    // (Note: In this simple client, we still reset A/X/Y for robustness,
+    // but applying catch-up to baseText keeps the rev numbers in sync).
+    if (catch_up && catch_up.length > 0) {
+      for (const rec of catch_up) {
+        try {
+          state.baseText = applyChangeset(state.baseText, rec.changeset);
+        } catch (e) {
+          log('error', 'catch-up apply failed: ' + e.message);
+        }
       }
     }
     state.editorText = state.baseText;
     state.serverRev = head_rev;
-    // Refresh A from the fully applied server text.
-    const nt = state.baseText.length;
-    state.A = { old_len: 0, new_len: nt, ops: nt === 0 ? [] : [{ op: 'insert', chars: state.baseText }] };
-    state.X = identity(nt);
-    state.Y = identity(nt);
   }
+
+  // Common initialization after state is caught up.
+  const nt = state.baseText.length;
+  // Reset canonical A to match current baseText (from empty doc).
+  state.A = { old_len: 0, new_len: nt, ops: nt === 0 ? [] : [{ op: 'insert', chars: state.baseText }] };
+  state.X = identity(nt);
+  state.Y = identity(nt);
+  state.waitingForAck = false;
 
   // Show the document in the editor.
   const editor = document.getElementById('editor');
@@ -541,7 +541,11 @@ function grpcToWsAddr(grpcAddr) {
   if (parts.length < 2) return 'ws://' + grpcAddr + '/ws';
   const host = parts[0] || 'localhost';
   const grpcPort = parseInt(parts[parts.length - 1], 10);
-  const wsPort = grpcPort - 4000; // 12000 → 8080, 12001 → 8081, 12002 → 8082
+  // Match the user's local port convention:
+  // 12000 (gRPC) -> 8080 (WS)
+  // 12001 (gRPC) -> 8081 (WS)
+  // Offset = 3920
+  const wsPort = grpcPort - 3920; 
   return `ws://${host}:${wsPort}/ws`;
 }
 
@@ -580,6 +584,7 @@ function submitTick() {
   state.Y = identity(currentText.length);
   state.waitingForAck = true;
   state.nextSubmissionId++;
+  localStorage.setItem('collab-editor-submission-id', state.nextSubmissionId.toString());
 
   log('ot', `SUBMIT: submission_id=${state.nextSubmissionId}, base_rev=${state.serverRev}, ops=${state.X.ops.length}`);
 

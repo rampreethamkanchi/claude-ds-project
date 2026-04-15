@@ -107,7 +107,18 @@ func (fsm *DocumentStateMachine) Apply(l *raft.Log) interface{} {
 			"submission_id", entry.SubmissionID,
 			"last_applied", lastSub,
 		)
-		return nil
+		// We still return a result so the leader can ACK the client,
+		// but we mark it as a duplicate and include the current headRev.
+		res := &ApplyResult{
+			ClientID:    entry.ClientID,
+			NewRev:      fsm.headRev,
+			IsDuplicate: true,
+		}
+		// Notify server handler so it can ACK (but not broadcast).
+		go func() {
+			fsm.onCommit(*res)
+		}()
+		return res
 	}
 
 	// ── OT Transformation ─────────────────────────────────────────────────────

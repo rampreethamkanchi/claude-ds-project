@@ -32,9 +32,10 @@ type RevisionRecord struct {
 // ApplyResult is the return value from DocumentStateMachine.Apply().
 // It carries the transformed changeset (C') needed to broadcast to connected clients.
 type ApplyResult struct {
-	CPrime   ot.Changeset // the transformed changeset to broadcast
-	NewRev   int          // the new head revision after this commit
-	ClientID string       // originating client (so the server knows who to ACK)
+	CPrime      ot.Changeset // the transformed changeset to broadcast
+	NewRev      int          // the new head revision after this commit
+	ClientID    string       // originating client (so the server knows who to ACK)
+	IsDuplicate bool         // true if this was a duplicate submission (not applied to doc)
 }
 
 // SnapshotData is serialized to disk by FSM.Snapshot() and read back by FSM.Restore().

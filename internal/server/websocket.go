@@ -412,6 +412,11 @@ func (n *Node) onCommit(result fsm.ApplyResult) {
 		origin.send(MsgAck, AckMsg{NewRev: result.NewRev})
 	}
 
+	// If this was a duplicate, we don't broadcast anything because no change occurred.
+	if result.IsDuplicate {
+		return
+	}
+
 	// Broadcast the transformed changeset C' to all OTHER locally connected clients.
 	for cid, client := range n.clients {
 		if cid == result.ClientID {

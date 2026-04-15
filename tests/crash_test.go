@@ -31,7 +31,7 @@ import (
 
 // diskCluster wraps a real 3-node cluster with BoltDB storage.
 type diskCluster struct {
-	nodes    []*raft.Raft
+	nodes    []*server.RaftNode
 	fsms     []*fsm.DocumentStateMachine
 	stores   []*store.BoltStore
 	dataDir  string
@@ -48,7 +48,7 @@ func newDiskCluster(t *testing.T, initialText string) *diskCluster {
 
 	const n = 3
 	// Pick random-ish ports to avoid conflicts between tests.
-	grpcPorts := []string{"13300", "13301", "13302"}
+	grpcPorts := []string{"14300", "14301", "14302"}
 	var grpcAddrs []string
 	for _, p := range grpcPorts {
 		grpcAddrs = append(grpcAddrs, "localhost:"+p)
@@ -74,7 +74,7 @@ func newDiskCluster(t *testing.T, initialText string) *diskCluster {
 			t.Fatalf("node %d setup: %v", i, err)
 		}
 
-		dc.nodes = append(dc.nodes, rn.Raft)
+		dc.nodes = append(dc.nodes, rn)
 		dc.fsms = append(dc.fsms, sm)
 		dc.stores = append(dc.stores, rn.LogStore)
 
@@ -89,8 +89,8 @@ func (dc *diskCluster) waitForLeader(t *testing.T) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		for i, r := range dc.nodes {
-			if r != nil && r.State() == raft.Leader {
+		for i, rn := range dc.nodes {
+			if rn != nil && rn.Raft.State() == raft.Leader {
 				return i
 			}
 		}
@@ -165,6 +165,11 @@ func TestCrash_FollowerCrashAndRecover(t *testing.T) {
 	}
 
 	dc := newDiskCluster(t, "initial")
+	defer func() {
+		for i := 0; i < 3; i++ {
+			dc.shutdownNode(i)
+		}
+	}()
 
 	leaderIdx := dc.waitForLeader(t)
 	t.Logf("leader = node %d", leaderIdx)
@@ -174,7 +179,7 @@ func TestCrash_FollowerCrashAndRecover(t *testing.T) {
 
 	// Apply 3 entries while all nodes are up.
 	for i := 0; i < 3; i++ {
-		diskApply(t, dc.nodes[leaderIdx], fsm.RaftLogEntry{
+		diskApply(t, dc.nodes[leaderIdx].Raft, fsm.RaftLogEntry{
 			ClientID:     "client-A",
 			SubmissionID: int64(i),
 			BaseRev:      i,
@@ -191,7 +196,7 @@ func TestCrash_FollowerCrashAndRecover(t *testing.T) {
 	// Apply 3 more entries while follower is down (quorum still holds: 2/3).
 	for i := 3; i < 6; i++ {
 		curText := dc.fsms[leaderIdx].HeadText()
-		diskApply(t, dc.nodes[leaderIdx], fsm.RaftLogEntry{
+		diskApply(t, dc.nodes[leaderIdx].Raft, fsm.RaftLogEntry{
 			ClientID:     "client-B",
 			SubmissionID: int64(i),
 			BaseRev:      dc.fsms[leaderIdx].HeadRev(),

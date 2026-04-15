@@ -91,11 +91,17 @@ func SetupRaft(cfg RaftConfig, stateMachine *fsm.DocumentStateMachine, logger *s
 
 	// ── Raft configuration ────────────────────────────────────────────────────
 	raftCfg := raft.DefaultConfig()
-	raftCfg.LocalID = raft.ServerID(cfg.NodeID)
+	// Internally, use the bind address as the Raft server ID so it aligns with peer lists.
+	raftCfg.LocalID = raft.ServerID(cfg.BindAddr)
 	// Tune timeouts for localhost clusters where latency is ~0ms.
-	raftCfg.HeartbeatTimeout = 200 * time.Millisecond
-	raftCfg.ElectionTimeout = 400 * time.Millisecond
-	raftCfg.CommitTimeout = 50 * time.Millisecond
+	raftCfg.HeartbeatTimeout = 50 * time.Millisecond
+	raftCfg.ElectionTimeout = 100 * time.Millisecond
+	raftCfg.LeaderLeaseTimeout = 50 * time.Millisecond
+	raftCfg.CommitTimeout = 10 * time.Millisecond
+
+	// raftCfg.HeartbeatTimeout = 500 * time.Millisecond
+	// raftCfg.ElectionTimeout = 1000 * time.Millisecond
+	// raftCfg.CommitTimeout = 100 * time.Millisecond
 
 	// ── Create Raft instance ──────────────────────────────────────────────────
 	r, err := raft.NewRaft(raftCfg, stateMachine, boltStore, boltStore, snapStore, mgr.Transport())
@@ -155,7 +161,7 @@ func SetupRaft(cfg RaftConfig, stateMachine *fsm.DocumentStateMachine, logger *s
 
 // Shutdown gracefully shuts down the Raft node and its gRPC server.
 func (n *RaftNode) Shutdown() {
-	n.grpcSrv.GracefulStop()
+	n.grpcSrv.Stop()
 	n.Raft.Shutdown().Error() //nolint:errcheck
 	n.LogStore.Close()        //nolint:errcheck
 }
