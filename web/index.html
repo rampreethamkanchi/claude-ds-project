@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distributed Collaborative Editor</title>
+  <style>
+    /* Simple, functional UI — not focused on aesthetics per spec */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: monospace;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: 8px;
+      gap: 6px;
+    }
+
+    #status-bar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      font-size: 12px;
+      background: #252526;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    .status-item { display: flex; gap: 4px; }
+    .label { color: #858585; }
+    .value { color: #4ec9b0; font-weight: bold; }
+    #conn-status { color: #f44747; }
+    #conn-status.connected { color: #4ec9b0; }
+
+    #editor {
+      flex: 1;
+      width: 100%;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      border: 1px solid #3c3c3c;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+      resize: none;
+      outline: none;
+    }
+
+    #log-container {
+      height: 130px;
+      overflow-y: auto;
+      background: #1a1a1a;
+      border: 1px solid #3c3c3c;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+    }
+
+    .log-entry { padding: 1px 0; border-bottom: 1px solid #2a2a2a; }
+    .log-entry.info  { color: #9cdcfe; }
+    .log-entry.warn  { color: #dcdcaa; }
+    .log-entry.error { color: #f44747; }
+    .log-entry.ot    { color: #4ec9b0; }
+
+    #controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    button {
+      background: #0e639c;
+      color: white;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover { background: #1177bb; }
+    button:disabled { background: #3c3c3c; cursor: default; }
+
+    input[type=text] {
+      background: #3c3c3c;
+      color: #d4d4d4;
+      border: 1px solid #555;
+      padding: 4px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+      width: 200px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div class="status-item">
+    <span class="label">Status:</span>
+    <span id="conn-status">Disconnected</span>
+  </div>
+  <div class="status-item">
+    <span class="label">Server:</span>
+    <span id="server-addr" class="value">—</span>
+  </div>
+  <div class="status-item">
+    <span class="label">Client ID:</span>
+    <span id="client-id-display" class="value">—</span>
+  </div>
+  <div class="status-item">
+    <span class="label">Rev:</span>
+    <span id="rev-display" class="value">0</span>
+  </div>
+  <div class="status-item">
+    <span class="label">Pending:</span>
+    <span id="pending-display" class="value">none</span>
+  </div>
+</div>
+
+<div id="controls">
+  <input type="text" id="server-input" value="ws://localhost:8080/ws" placeholder="ws://host:port/ws">
+  <button id="connect-btn" onclick="connectToServer()">Connect</button>
+  <button id="disconnect-btn" onclick="disconnectFromServer()" disabled>Disconnect</button>
+  <span style="font-size:11px; color:#858585;">Node 1: :8080 &nbsp; Node 2: :8081 &nbsp; Node 3: :8082</span>
+</div>
+
+<textarea id="editor" placeholder="Connect to a server to start editing..." disabled></textarea>
+
+<div id="log-container" id="log"></div>
+
+<script src="client.js"></script>
+</body>
+</html>
