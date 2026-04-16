@@ -309,6 +309,18 @@ func (n *Node) handleConnect(conn *websocket.Conn, msg ConnectMsg) *wsClient {
 	n.clients[msg.ClientID] = client
 	n.mu.Unlock()
 
+	// ── Leader check ──
+	// If we are not the leader, redirect immediately so the client doesn't
+	// start typing on a node that can't accept writes.
+	if !n.raftNode.IsLeader() {
+		leaderAddr := n.raftNode.LeaderAddr()
+		if leaderAddr != "" {
+			n.logger.Info("eager redirect on connect", "client_id", msg.ClientID, "leader_addr", leaderAddr)
+			client.send(MsgRedirect, RedirectMsg{LeaderAddr: leaderAddr})
+			return client
+		}
+	}
+
 	// Build catch-up: all revisions since last_known_rev.
 	catchUp := n.sm.RevisionsSince(msg.LastKnownRev)
 

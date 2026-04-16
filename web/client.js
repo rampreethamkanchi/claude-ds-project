@@ -87,7 +87,7 @@ function compose(A, B) {
       const op = s.ops[s.pos];
       const rem = op.op === 'insert' ? op.chars.length - s.off : op.n - s.off;
       if (n >= rem) { n -= rem; s.pos++; s.off = 0; }
-      else          { s.off += n; n = 0; }
+      else { s.off += n; n = 0; }
     }
   }
   function addOp(op) {
@@ -163,7 +163,7 @@ function follow(A, B) {
       const op = s.ops[s.pos];
       const rem = op.op === 'insert' ? op.chars.length - s.off : op.n - s.off;
       if (n >= rem) { n -= rem; s.pos++; s.off = 0; }
-      else          { s.off += n; n = 0; }
+      else { s.off += n; n = 0; }
     }
   }
   function addOp(op) {
@@ -241,20 +241,20 @@ function diffToChangeset(oldText, newText) {
   const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
   for (let i = 1; i <= n; i++)
     for (let j = 1; j <= m; j++)
-      dp[i][j] = oldText[i-1] === newText[j-1]
-        ? dp[i-1][j-1] + 1
-        : Math.max(dp[i-1][j], dp[i][j-1]);
+      dp[i][j] = oldText[i - 1] === newText[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
 
   // Backtrack
   const segs = [];
   let i = n, j = m;
   while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldText[i-1] === newText[j-1]) {
-      segs.push({ kind: '=', c: oldText[i-1] }); i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
-      segs.push({ kind: '+', c: newText[j-1] }); j--;
+    if (i > 0 && j > 0 && oldText[i - 1] === newText[j - 1]) {
+      segs.push({ kind: '=', c: oldText[i - 1] }); i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      segs.push({ kind: '+', c: newText[j - 1] }); j--;
     } else {
-      segs.push({ kind: '-', c: oldText[i-1] }); i--;
+      segs.push({ kind: '-', c: oldText[i - 1] }); i--;
     }
   }
   segs.reverse();
@@ -362,10 +362,10 @@ function onWsMessage(evt) {
 
   switch (type) {
     case 'CONNECT_ACK': handleConnectAck(payload); break;
-    case 'ACK':         handleAck(payload);         break;
-    case 'BROADCAST':   handleBroadcast(payload);   break;
-    case 'REDIRECT':    handleRedirect(payload);    break;
-    case 'ERROR':       log('error', `Server error ${payload.code}: ${payload.message}`); break;
+    case 'ACK': handleAck(payload); break;
+    case 'BROADCAST': handleBroadcast(payload); break;
+    case 'REDIRECT': handleRedirect(payload); break;
+    case 'ERROR': log('error', `Server error ${payload.code}: ${payload.message}`); break;
     default: log('warn', `Unknown message type: ${type}`);
   }
 }
@@ -397,22 +397,32 @@ function handleConnectAck(payload) {
       for (const rec of catch_up) {
         try {
           state.baseText = applyChangeset(state.baseText, rec.changeset);
+          // Rebase X and Y against this historical change we missed.
+          state.X = follow(rec.changeset, state.X);
+          state.Y = follow(follow(state.X, rec.changeset), state.Y);
         } catch (e) {
           log('error', 'catch-up apply failed: ' + e.message);
         }
       }
     }
-    state.editorText = state.baseText;
     state.serverRev = head_rev;
   }
 
   // Common initialization after state is caught up.
+  // Note: We NO LONGER reset A/X/Y to identity here.
+  // We re-derive A from the new baseText.
   const nt = state.baseText.length;
-  // Reset canonical A to match current baseText (from empty doc).
   state.A = { old_len: 0, new_len: nt, ops: nt === 0 ? [] : [{ op: 'insert', chars: state.baseText }] };
-  state.X = identity(nt);
-  state.Y = identity(nt);
-  state.waitingForAck = false;
+
+  // Update the editor text to match the merged result of A · X · Y.
+  try {
+    const afterAX = applyChangeset(state.baseText, state.X);
+    state.editorText = applyChangeset(afterAX, state.Y);
+  } catch (e) {
+    state.editorText = state.baseText;
+    state.X = identity(nt);
+    state.Y = identity(nt);
+  }
 
   // Show the document in the editor.
   const editor = document.getElementById('editor');
@@ -469,6 +479,16 @@ function handleBroadcast(payload) {
   log('ot', `BROADCAST: new_rev=${new_rev}, ops=${B.ops.length}`);
 
   try {
+    const editor = document.getElementById('editor');
+    const currentText = editor.value;
+
+    // ── Pre-synchronization: Consolidate local edits ──
+    // Before we can rebase against B, we must ensure Y covers all typing
+    // that happened since the last submitTick or handleBroadcast.
+    const afterAX = applyChangeset(state.baseText, state.X);
+    state.Y = diffToChangeset(afterAX, currentText);
+
+    // ── OTrebasing ──
     const XfollowB = follow(state.X, B);      // f(X, B)
     const BfollowX = follow(B, state.X);      // f(B, X) — used to compute X'
 
@@ -477,11 +497,9 @@ function handleBroadcast(payload) {
     const Y_prime = follow(XfollowB, state.Y); // Y' = f(f(X,B), Y)
     const D = follow(state.Y, XfollowB);       // D = f(Y, f(X, B)) — apply to screen
 
-    // Apply D to the current document view.
-    const editor = document.getElementById('editor');
+    // ── Apply D to the current document view ──
     const cursorStart = editor.selectionStart;
     const cursorEnd = editor.selectionEnd;
-    const currentText = editor.value;
 
     const newText = applyChangeset(currentText, D);
     editor.value = newText;
@@ -501,7 +519,7 @@ function handleBroadcast(payload) {
     try {
       state.baseText = applyChangeset('', state.A);
     } catch (_) {
-      state.baseText = newText;
+      state.baseText = applyChangeset(state.baseText, B);
     }
 
     updateStatus();
@@ -545,7 +563,7 @@ function grpcToWsAddr(grpcAddr) {
   // 12000 (gRPC) -> 8080 (WS)
   // 12001 (gRPC) -> 8081 (WS)
   // Offset = 3920
-  const wsPort = grpcPort - 3920; 
+  const wsPort = grpcPort - 3920;
   return `ws://${host}:${wsPort}/ws`;
 }
 
@@ -562,7 +580,16 @@ function grpcToWsAddr(grpcAddr) {
  */
 function submitTick() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (state.waitingForAck) return;
+  // If we already have a pending X, we are either waiting for its ACK
+  // or we just reconnected and need to re-submit it.
+  if (state.waitingForAck) {
+    // Only re-submit if the WebSocket is open.
+    if (!lastSubmissionTime || Date.now() - lastSubmissionTime > 2000) {
+      log('info', `Re-submitting X: submission_id=${state.nextSubmissionId}`);
+      sendSubmit();
+    }
+    return;
+  }
 
   // Compute the current Y by diffing editor text vs base text.
   const editor = document.getElementById('editor');
@@ -571,9 +598,8 @@ function submitTick() {
   // Base text = text after A and X have been applied.
   // Since X is identity when we're free to submit, base = A applied to "".
   let afterAX = state.baseText;
-  // If X is not identity (shouldn't happen when waitingForAck=false), apply it.
   if (!isIdentity(state.X)) {
-    try { afterAX = applyChangeset(afterAX, state.X); } catch (_) {}
+    try { afterAX = applyChangeset(afterAX, state.X); } catch (_) { }
   }
 
   const Y = diffToChangeset(afterAX, currentText);
@@ -586,6 +612,12 @@ function submitTick() {
   state.nextSubmissionId++;
   localStorage.setItem('collab-editor-submission-id', state.nextSubmissionId.toString());
 
+  sendSubmit();
+}
+
+let lastSubmissionTime = 0;
+function sendSubmit() {
+  lastSubmissionTime = Date.now();
   log('ot', `SUBMIT: submission_id=${state.nextSubmissionId}, base_rev=${state.serverRev}, ops=${state.X.ops.length}`);
 
   sendMsg('SUBMIT', {
@@ -653,7 +685,7 @@ function log(level, msg) {
   const container = document.getElementById('log-container');
   const el = document.createElement('div');
   el.className = 'log-entry ' + level;
-  el.textContent = `[${new Date().toISOString().slice(11,23)}] ${msg}`;
+  el.textContent = `[${new Date().toISOString().slice(11, 23)}] ${msg}`;
   container.appendChild(el);
   // Keep log manageable.
   if (++logCount > 200) {
@@ -668,7 +700,105 @@ function log(level, msg) {
 // For now the 500ms timer handles diffing automatically.
 // ─────────────────────────────────────────────────────────────────
 
-document.getElementById('editor').addEventListener('input', () => {
-  // The diff is computed in submitTick — nothing extra needed here.
-  // (We keep this listener for future keystroke-level tracking if needed.)
-});
+// ─────────────────────────────────────────────────────────────────
+// Stress Test / Automation (Requested by USER)
+// ─────────────────────────────────────────────────────────────────
+
+let stressTimer = null;
+let stressRand = null;
+
+function toggleStressTest() {
+  if (stressTimer) {
+    stopStressTest();
+  } else {
+    startStressTest();
+  }
+}
+
+function startStressTest() {
+  const cps = parseInt(document.getElementById('stress-cps').value, 10);
+  const seed = parseInt(document.getElementById('stress-seed').value, 10);
+  const duration = parseInt(document.getElementById('stress-duration').value, 10);
+  const editor = document.getElementById('editor');
+
+  if (!editor || editor.disabled) {
+    log('error', 'Cannot start stress test: Editor is disabled');
+    return;
+  }
+
+  log('warn', `Starting stress test: CPS=${cps}, Seed=${seed}, Duration=${duration}s`);
+  document.getElementById('stress-start-btn').textContent = 'Stop Stress Test';
+  document.getElementById('stress-start-btn').style.background = '#f44747';
+
+  stressRand = mulberry32(seed);
+  const intervalMs = 1000 / cps;
+  const startedAt = Date.now();
+
+  stressTimer = setInterval(() => {
+    if (Date.now() - startedAt >= duration * 1000) {
+      stopStressTest();
+      return;
+    }
+    performRandomOp();
+  }, intervalMs);
+}
+
+function stopStressTest() {
+  if (stressTimer) {
+    clearInterval(stressTimer);
+    stressTimer = null;
+  }
+  document.getElementById('stress-start-btn').textContent = 'Start Stress Test';
+  document.getElementById('stress-start-btn').style.background = '#0e639c';
+  log('info', 'Stress test stopped.');
+}
+
+function mulberry32(a) {
+  return function () {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function performRandomOp() {
+  const editor = document.getElementById('editor');
+  const weights = {
+    insert: parseInt(document.getElementById('weight-insert').value, 10) / 100,
+    backspace: parseInt(document.getElementById('weight-backspace').value, 10) / 100,
+    enter: parseInt(document.getElementById('weight-enter').value, 10) / 100,
+    move: parseInt(document.getElementById('weight-move').value, 10) / 100,
+  };
+
+  const x = stressRand();
+  let action = 'insert';
+  let sum = 0;
+  for (const [k, p] of Object.entries(weights)) {
+    sum += p;
+    if (x < sum) { action = k; break; }
+  }
+
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ';
+  const pos = editor.selectionStart;
+
+  switch (action) {
+    case 'insert':
+      const s = chars[Math.floor(stressRand() * chars.length)];
+      editor.setRangeText(s, pos, pos, 'end');
+      break;
+    case 'backspace':
+      if (pos > 0) editor.setRangeText('', pos - 1, pos, 'end');
+      break;
+    case 'enter':
+      editor.setRangeText('\n', pos, pos, 'end');
+      break;
+    case 'move':
+      const dir = stressRand() < 0.5 ? -1 : 1;
+      const newPos = Math.max(0, Math.min(editor.value.length, pos + dir));
+      editor.setSelectionRange(newPos, newPos);
+      break;
+  }
+  // Trigger input event for diffing.
+  editor.dispatchEvent(new Event('input', { bubbles: true }));
+}

@@ -1,12 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Distributed Collaborative Editor</title>
   <style>
     /* Simple, functional UI — not focused on aesthetics per spec */
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
     body {
       font-family: monospace;
@@ -29,11 +34,27 @@
       border-radius: 4px;
     }
 
-    .status-item { display: flex; gap: 4px; }
-    .label { color: #858585; }
-    .value { color: #4ec9b0; font-weight: bold; }
-    #conn-status { color: #f44747; }
-    #conn-status.connected { color: #4ec9b0; }
+    .status-item {
+      display: flex;
+      gap: 4px;
+    }
+
+    .label {
+      color: #858585;
+    }
+
+    .value {
+      color: #4ec9b0;
+      font-weight: bold;
+    }
+
+    #conn-status {
+      color: #f44747;
+    }
+
+    #conn-status.connected {
+      color: #4ec9b0;
+    }
 
     #editor {
       flex: 1;
@@ -60,11 +81,26 @@
       font-size: 11px;
     }
 
-    .log-entry { padding: 1px 0; border-bottom: 1px solid #2a2a2a; }
-    .log-entry.info  { color: #9cdcfe; }
-    .log-entry.warn  { color: #dcdcaa; }
-    .log-entry.error { color: #f44747; }
-    .log-entry.ot    { color: #4ec9b0; }
+    .log-entry {
+      padding: 1px 0;
+      border-bottom: 1px solid #2a2a2a;
+    }
+
+    .log-entry.info {
+      color: #9cdcfe;
+    }
+
+    .log-entry.warn {
+      color: #dcdcaa;
+    }
+
+    .log-entry.error {
+      color: #f44747;
+    }
+
+    .log-entry.ot {
+      color: #4ec9b0;
+    }
 
     #controls {
       display: flex;
@@ -81,8 +117,15 @@
       cursor: pointer;
       font-size: 12px;
     }
-    button:hover { background: #1177bb; }
-    button:disabled { background: #3c3c3c; cursor: default; }
+
+    button:hover {
+      background: #1177bb;
+    }
+
+    button:disabled {
+      background: #3c3c3c;
+      cursor: default;
+    }
 
     input[type=text] {
       background: #3c3c3c;
@@ -95,42 +138,61 @@
     }
   </style>
 </head>
+
 <body>
 
-<div id="status-bar">
-  <div class="status-item">
-    <span class="label">Status:</span>
-    <span id="conn-status">Disconnected</span>
+  <div id="status-bar">
+    <div class="status-item">
+      <span class="label">Status:</span>
+      <span id="conn-status">Disconnected</span>
+    </div>
+    <div class="status-item">
+      <span class="label">Server:</span>
+      <span id="server-addr" class="value">—</span>
+    </div>
+    <div class="status-item">
+      <span class="label">Client ID:</span>
+      <span id="client-id-display" class="value">—</span>
+    </div>
+    <div class="status-item">
+      <span class="label">Rev:</span>
+      <span id="rev-display" class="value">0</span>
+    </div>
+    <div class="status-item">
+      <span class="label">Pending:</span>
+      <span id="pending-display" class="value">none</span>
+    </div>
   </div>
-  <div class="status-item">
-    <span class="label">Server:</span>
-    <span id="server-addr" class="value">—</span>
-  </div>
-  <div class="status-item">
-    <span class="label">Client ID:</span>
-    <span id="client-id-display" class="value">—</span>
-  </div>
-  <div class="status-item">
-    <span class="label">Rev:</span>
-    <span id="rev-display" class="value">0</span>
-  </div>
-  <div class="status-item">
-    <span class="label">Pending:</span>
-    <span id="pending-display" class="value">none</span>
-  </div>
-</div>
 
-<div id="controls">
-  <input type="text" id="server-input" value="ws://localhost:8080/ws" placeholder="ws://host:port/ws">
-  <button id="connect-btn" onclick="connectToServer()">Connect</button>
-  <button id="disconnect-btn" onclick="disconnectFromServer()" disabled>Disconnect</button>
-  <span style="font-size:11px; color:#858585;">Node 1: :8080 &nbsp; Node 2: :8081 &nbsp; Node 3: :8082</span>
-</div>
+  <div id="controls">
+    <input type="text" id="server-input" value="ws://localhost:8080/ws" placeholder="ws://host:port/ws">
+    <button id="connect-btn" onclick="connectToServer()">Connect</button>
+    <button id="disconnect-btn" onclick="disconnectFromServer()" disabled>Disconnect</button>
+    <span style="font-size:11px; color:#858585;">Node 1: :8080 &nbsp; Node 2: :8081 &nbsp; Node 3: :8082</span>
+  </div>
 
-<textarea id="editor" placeholder="Connect to a server to start editing..." disabled></textarea>
+  <textarea id="editor" placeholder="Connect to a server to start editing..." disabled></textarea>
 
-<div id="log-container" id="log"></div>
+  <div id="stress-test-panel" style="background: #252526; padding: 10px; border-radius: 4px; border: 1px solid #3c3c3c; display: flex; flex-direction: column; gap: 8px;">
+    <div style="display: flex; gap: 15px; align-items: center; font-size: 12px;">
+      <strong>Stress Test Tools</strong>
+      <label>CPS: <input type="number" id="stress-cps" value="20" style="width: 40px; background: #3c3c3c; border: 1px solid #555; color: white;"></label>
+      <label>Seed: <input type="number" id="stress-seed" value="12345" style="width: 60px; background: #3c3c3c; border: 1px solid #555; color: white;"></label>
+      <label>Duration (s): <input type="number" id="stress-duration" value="10" style="width: 40px; background: #3c3c3c; border: 1px solid #555; color: white;"></label>
+      <button id="stress-start-btn" onclick="toggleStressTest()">Start Stress Test</button>
+    </div>
+    <div style="display: flex; gap: 10px; font-size: 11px; color: #858585;">
+      Weights — 
+      <label>Insert: <input type="number" id="weight-insert" value="60" style="width: 30px; background: #3c3c3c; border: 1px solid #555; color: #aaa;">%</label>
+      <label>BS: <input type="number" id="weight-backspace" value="10" style="width: 30px; background: #3c3c3c; border: 1px solid #555; color: #aaa;">%</label>
+      <label>Enter: <input type="number" id="weight-enter" value="8" style="width: 30px; background: #3c3c3c; border: 1px solid #555; color: #aaa;">%</label>
+      <label>Move: <input type="number" id="weight-move" value="22" style="width: 30px; background: #3c3c3c; border: 1px solid #555; color: #aaa;">%</label>
+    </div>
+  </div>
 
-<script src="client.js"></script>
+  <div id="log-container"></div>
+
+  <script src="client.js"></script>
 </body>
+
 </html>
