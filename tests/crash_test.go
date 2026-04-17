@@ -26,7 +26,7 @@ import (
 	"distributed-editor/internal/server"
 	"distributed-editor/internal/store"
 
-	"github.com/hashicorp/raft"
+	"distributed-editor/internal/raft"
 )
 
 // diskCluster wraps a real 3-node cluster with BoltDB storage.
@@ -90,7 +90,7 @@ func (dc *diskCluster) waitForLeader(t *testing.T) int {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		for i, rn := range dc.nodes {
-			if rn != nil && rn.Raft.State() == raft.Leader {
+			if rn != nil && rn.Raft.IsLeader() {
 				return i
 			}
 		}
@@ -141,7 +141,7 @@ func (dc *diskCluster) shutdownNode(idx int) {
 	}
 }
 
-func diskApply(t *testing.T, r *raft.Raft, entry fsm.RaftLogEntry) {
+func diskApply(t *testing.T, r *raft.RaftNode, entry fsm.RaftLogEntry) {
 	t.Helper()
 	data, err := fsm.MarshalEntry(entry)
 	if err != nil {

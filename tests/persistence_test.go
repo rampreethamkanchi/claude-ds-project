@@ -12,7 +12,7 @@ import (
 	"distributed-editor/internal/fsm"
 	"distributed-editor/internal/ot"
 
-	"github.com/hashicorp/raft"
+
 )
 
 // TestPersistence_DuplicateAck verifies that re-submitting an already applied entry
@@ -29,10 +29,9 @@ func TestPersistence_DuplicateAck(t *testing.T) {
 		Changeset:    ot.MakeInsert(0, 0, "hello"),
 	}
 	data, _ := fsm.MarshalEntry(entry)
-	log := &raft.Log{Data: data}
 
 	// First application.
-	res1Raw := sm.Apply(log)
+	res1Raw := sm.Apply(data)
 	res1 := res1Raw.(*fsm.ApplyResult)
 	if res1.IsDuplicate {
 		t.Fatal("first apply should not be a duplicate")
@@ -42,7 +41,7 @@ func TestPersistence_DuplicateAck(t *testing.T) {
 	}
 
 	// Second (duplicate) application.
-	res2Raw := sm.Apply(log)
+	res2Raw := sm.Apply(data)
 	if res2Raw == nil {
 		t.Fatal("duplicate apply returned nil, expected non-nil ApplyResult")
 	}

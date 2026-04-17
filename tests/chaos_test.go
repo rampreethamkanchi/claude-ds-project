@@ -22,7 +22,7 @@ import (
 	"distributed-editor/internal/fsm"
 	"distributed-editor/internal/ot"
 
-	"github.com/hashicorp/raft"
+	"distributed-editor/internal/raft"
 )
 
 // SimulatedClient models the behaviour of a real browser client.
@@ -111,9 +111,9 @@ func TestChaos_Convergence(t *testing.T) {
 	t.Logf("chaos test: initial leader = node %d", leaderIdx)
 
 	// We want the leader reference to always be current.
-	getLeader := func() *raft.Raft {
+	getLeader := func() *raft.RaftNode {
 		for _, r := range cluster.nodes {
-			if r.State() == raft.Leader {
+			if r.IsLeader() {
 				return r
 			}
 		}

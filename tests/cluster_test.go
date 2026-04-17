@@ -1,8 +1,8 @@
 // tests/cluster_test.go
 //
-// In-memory 3-node Raft cluster tests.
+// In-memory 3-node custom Raft cluster tests.
 //
-// These tests spin up a full 3-node cluster using hashicorp/raft's InmemTransport
+// These tests spin up a full 3-node cluster using our custom raft.InmemTransport
 // so no real TCP sockets are needed. Tests run in milliseconds.
 //
 // Key assertions:
@@ -19,8 +19,7 @@ import (
 
 	"distributed-editor/internal/fsm"
 	"distributed-editor/internal/ot"
-
-	"github.com/hashicorp/raft"
+	"distributed-editor/internal/raft"
 )
 
 // ─────────────────────────────────────────────
@@ -28,7 +27,7 @@ import (
 // ─────────────────────────────────────────────
 
 type memCluster struct {
-	nodes  []*raft.Raft
+	nodes  []*raft.RaftNode
 	fsms   []*fsm.DocumentStateMachine
 	trans  []*raft.InmemTransport
 	logger *slog.Logger
@@ -43,13 +42,19 @@ func newMemCluster(t *testing.T, initialText string) *memCluster {
 	const n = 3
 	cluster := &memCluster{logger: logger}
 
-	addrs := [n]raft.ServerAddress{"node-0", "node-1", "node-2"}
-	var rafts [n]*raft.Raft
+	addrs := [n]string{"node-0", "node-1", "node-2"}
+	var rafts [n]*raft.RaftNode
 	var trans [n]*raft.InmemTransport
+
+	// Build peer config list
+	var peers []raft.PeerConfig
+	for i := 0; i < n; i++ {
+		peers = append(peers, raft.PeerConfig{ID: addrs[i], Address: addrs[i]})
+	}
 
 	// Create transports.
 	for i := 0; i < n; i++ {
-		_, trans[i] = raft.NewInmemTransport(addrs[i])
+		trans[i] = raft.NewInmemTransport(addrs[i])
 		cluster.trans = append(cluster.trans, trans[i])
 	}
 
@@ -62,44 +67,27 @@ func newMemCluster(t *testing.T, initialText string) *memCluster {
 		}
 	}
 
-	// Build the initial cluster configuration.
-	var servers []raft.Server
-	for i := 0; i < n; i++ {
-		servers = append(servers, raft.Server{
-			Suffrage: raft.Voter,
-			ID:       raft.ServerID(addrs[i]),
-			Address:  addrs[i],
-		})
-	}
-	configuration := raft.Configuration{Servers: servers}
-
 	// Create each Raft node with an in-memory log/stable store.
 	for i := 0; i < n; i++ {
 		nodeLogger := logger.With("node", addrs[i])
 		sm := fsm.NewDocumentStateMachine(initialText, nodeLogger)
 		cluster.fsms = append(cluster.fsms, sm)
 
-		cfg := raft.DefaultConfig()
-		cfg.LocalID = raft.ServerID(addrs[i])
-		cfg.HeartbeatTimeout = 50 * time.Millisecond
-		cfg.ElectionTimeout = 100 * time.Millisecond
-		cfg.CommitTimeout = 10 * time.Millisecond
-		cfg.LeaderLeaseTimeout = 50 * time.Millisecond
-
-		logStore := raft.NewInmemStore()
-		stableStore := raft.NewInmemStore()
-		snapStore := raft.NewInmemSnapshotStore()
-
-		r, err := raft.NewRaft(cfg, sm, logStore, stableStore, snapStore, trans[i])
-		if err != nil {
-			t.Fatalf("node %d: NewRaft: %v", i, err)
+		cfg := &raft.Config{
+			ServerID:           addrs[i],
+			Peers:              peers,
+			LogStore:           raft.NewInmemLogStore(),
+			StableStore:        raft.NewInmemStableStore(),
+			FSM:                sm,
+			ElectionTimeoutMin: 50 * time.Millisecond,
+			ElectionTimeoutMax: 100 * time.Millisecond,
+			HeartbeatInterval:  10 * time.Millisecond,
+			Logger:             nodeLogger,
 		}
 
-		// Bootstrap on node 0 only.
-		if i == 0 {
-			if fut := r.BootstrapCluster(configuration); fut.Error() != nil {
-				t.Fatalf("bootstrap: %v", fut.Error())
-			}
+		r, err := raft.NewRaftNode(cfg, trans[i])
+		if err != nil {
+			t.Fatalf("node %d: NewRaftNode: %v", i, err)
 		}
 
 		rafts[i] = r
@@ -115,7 +103,7 @@ func (c *memCluster) waitForLeader(t *testing.T) int {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for i, r := range c.nodes {
-			if r.State() == raft.Leader {
+			if r.IsLeader() {
 				return i
 			}
 		}
@@ -126,7 +114,7 @@ func (c *memCluster) waitForLeader(t *testing.T) int {
 }
 
 // applyEntry proposes a changeset to the given Raft node and waits for commit.
-func applyEntry(t *testing.T, r *raft.Raft, entry fsm.RaftLogEntry) {
+func applyEntry(t *testing.T, r *raft.RaftNode, entry fsm.RaftLogEntry) {
 	t.Helper()
 	data, err := fsm.MarshalEntry(entry)
 	if err != nil {
@@ -301,14 +289,14 @@ func TestCluster_LeaderFailover(t *testing.T) {
 	t.Logf("killed leader node %d", leaderIdx)
 
 	// Wait for a new leader to be elected from the remaining 2 nodes.
-	var newLeader *raft.Raft
+	var newLeader *raft.RaftNode
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		for i, r := range cluster.nodes {
 			if i == leaderIdx {
 				continue // skip the dead node
 			}
-			if r.State() == raft.Leader {
+			if r.IsLeader() {
 				newLeader = r
 				t.Logf("new leader elected: node %d", i)
 				break

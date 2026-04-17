@@ -38,14 +38,7 @@ type ApplyResult struct {
 	IsDuplicate bool         // true if this was a duplicate submission (not applied to doc)
 }
 
-// SnapshotData is serialized to disk by FSM.Snapshot() and read back by FSM.Restore().
-// It encodes the complete state machine state so a restarting node can skip log replay.
-type SnapshotData struct {
-	HeadRev             int                `json:"head_rev"`
-	HeadText            string             `json:"head_text"`
-	RevisionLog         []RevisionRecord   `json:"revision_log"`
-	ClientLastSubmission map[string]int64  `json:"client_last_submission"` // dedup map
-}
+
 
 // MarshalEntry serializes a RaftLogEntry to JSON bytes for the Raft log.
 func MarshalEntry(e RaftLogEntry) ([]byte, error) {

@@ -1,6 +1,6 @@
 // Package fsm — fsm.go
 //
-// DocumentStateMachine implements the hashicorp/raft FSM interface.
+// DocumentStateMachine implements the custom raft.FSM interface.
 //
 // This is the central component of the system. Every Raft node runs this same
 // state machine. When Raft commits a log entry, it calls Apply() on every node.
@@ -15,16 +15,10 @@
 package fsm
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 
 	"distributed-editor/internal/ot"
-
-	"github.com/hashicorp/raft"
 )
 
 // DocumentStateMachine is the Raft FSM that manages the collaborative document.
@@ -84,11 +78,11 @@ func (fsm *DocumentStateMachine) SetOnCommit(cb func(ApplyResult)) {
 //
 // It returns an *ApplyResult (or nil if dedup fired), which the Raft leader
 // can retrieve via raft.ApplyFuture.Response().
-func (fsm *DocumentStateMachine) Apply(l *raft.Log) interface{} {
+func (fsm *DocumentStateMachine) Apply(data []byte) interface{} {
 	// Deserialize the committed log entry.
-	entry, err := UnmarshalEntry(l.Data)
+	entry, err := UnmarshalEntry(data)
 	if err != nil {
-		fsm.logger.Error("failed to unmarshal raft log entry", "err", err)
+		fsm.logger.Error("failed to unmarshal log entry", "err", err)
 		return nil
 	}
 
@@ -97,9 +91,6 @@ func (fsm *DocumentStateMachine) Apply(l *raft.Log) interface{} {
 
 	// ── Idempotency guard ──────────────────────────────────────────────────────
 	// If we've already applied this submission_id from this client, ignore it.
-	// This handles the case where the leader crashed after committing to Raft
-	// but before sending the ACK back to the client, causing the client to
-	// re-submit the same changeset on reconnection.
 	lastSub, seen := fsm.clientLastSubmission[entry.ClientID]
 	if seen && entry.SubmissionID <= lastSub {
 		fsm.logger.Info("skipping duplicate entry",
@@ -122,14 +113,6 @@ func (fsm *DocumentStateMachine) Apply(l *raft.Log) interface{} {
 	}
 
 	// ── OT Transformation ─────────────────────────────────────────────────────
-	// Catch the client's changeset C up from base_rev to head_rev by applying
-	// follow() for each historical revision in between.
-	//
-	// If client submitted based on revision 5 and we are now at revision 8:
-	//   C = follow(rev5_cs, C)
-	//   C = follow(rev6_cs, C)
-	//   C = follow(rev7_cs, C)
-	// After the loop, C is relative to head_rev (the current HEAD).
 	C := entry.Changeset
 
 	for r := entry.BaseRev; r < fsm.headRev; r++ {
@@ -181,74 +164,11 @@ func (fsm *DocumentStateMachine) Apply(l *raft.Log) interface{} {
 		ClientID: entry.ClientID,
 	}
 
-	// Call the callback (e.g. to broadcast to WebSocket clients).
-	// We call outside the lock to avoid deadlock if the callback also reads FSM state.
-	// Safe because headRev and revisionLog are only appended (never modified).
 	go func() {
 		fsm.onCommit(result)
 	}()
 
 	return &result
-}
-
-// ─────────────────────────────────────────────
-// raft.FSM interface — Snapshot
-// ─────────────────────────────────────────────
-
-// Snapshot returns an FSMSnapshot that captures the current state machine state.
-// hashicorp/raft calls this periodically to allow log compaction.
-// After a snapshot is taken, the Raft log entries before the snapshot index can
-// be discarded — a new node can restore directly from the snapshot.
-func (fsm *DocumentStateMachine) Snapshot() (raft.FSMSnapshot, error) {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-
-	// Deep-copy the state to avoid races with concurrent Apply() calls.
-	logCopy := make([]RevisionRecord, len(fsm.revisionLog))
-	copy(logCopy, fsm.revisionLog)
-
-	dedupCopy := make(map[string]int64, len(fsm.clientLastSubmission))
-	for k, v := range fsm.clientLastSubmission {
-		dedupCopy[k] = v
-	}
-
-	data := SnapshotData{
-		HeadRev:              fsm.headRev,
-		HeadText:             fsm.headText,
-		RevisionLog:          logCopy,
-		ClientLastSubmission: dedupCopy,
-	}
-
-	return &fsmSnapshot{data: data}, nil
-}
-
-// ─────────────────────────────────────────────
-// raft.FSM interface — Restore
-// ─────────────────────────────────────────────
-
-// Restore resets the state machine to the state encoded in the snapshot.
-// Called when a node joins the cluster or restarts and receives a snapshot.
-func (fsm *DocumentStateMachine) Restore(rc io.ReadCloser) error {
-	defer rc.Close()
-
-	var data SnapshotData
-	if err := json.NewDecoder(rc).Decode(&data); err != nil {
-		return fmt.Errorf("restore: failed to decode snapshot: %w", err)
-	}
-
-	fsm.mu.Lock()
-	defer fsm.mu.Unlock()
-
-	fsm.headRev = data.HeadRev
-	fsm.headText = data.HeadText
-	fsm.revisionLog = data.RevisionLog
-	fsm.clientLastSubmission = data.ClientLastSubmission
-	if fsm.clientLastSubmission == nil {
-		fsm.clientLastSubmission = make(map[string]int64)
-	}
-
-	fsm.logger.Info("restored from snapshot", "head_rev", fsm.headRev)
-	return nil
 }
 
 // ─────────────────────────────────────────────
@@ -270,46 +190,14 @@ func (fsm *DocumentStateMachine) HeadRev() int {
 }
 
 // RevisionsSince returns all revision records from `fromRev` onwards.
-// Used to send catch-up changesets to reconnecting clients.
 func (fsm *DocumentStateMachine) RevisionsSince(fromRev int) []RevisionRecord {
 	fsm.mu.RLock()
 	defer fsm.mu.RUnlock()
 	if fromRev >= len(fsm.revisionLog) {
 		return nil
 	}
-	// Return a copy to avoid data races.
 	slice := fsm.revisionLog[fromRev:]
 	result := make([]RevisionRecord, len(slice))
 	copy(result, slice)
 	return result
 }
-
-// ─────────────────────────────────────────────
-// fsmSnapshot — implements raft.FSMSnapshot
-// ─────────────────────────────────────────────
-
-type fsmSnapshot struct {
-	data SnapshotData
-}
-
-// Persist writes the snapshot to the provided raft.SnapshotSink.
-func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	err := func() error {
-		b, err := json.Marshal(s.data)
-		if err != nil {
-			return fmt.Errorf("persist: marshal failed: %w", err)
-		}
-		if _, err = io.Copy(sink, bytes.NewReader(b)); err != nil {
-			return fmt.Errorf("persist: write failed: %w", err)
-		}
-		return sink.Close()
-	}()
-	if err != nil {
-		sink.Cancel()
-		return err
-	}
-	return nil
-}
-
-// Release is called by Raft after Persist — nothing to clean up here.
-func (s *fsmSnapshot) Release() {}

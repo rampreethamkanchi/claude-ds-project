@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/hashicorp/raft"
+	"distributed-editor/internal/raft"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -93,23 +93,25 @@ func (s *BoltStore) LastIndex() (uint64, error) {
 }
 
 // GetLog retrieves a log entry by index, writing it into `out`.
-func (s *BoltStore) GetLog(index uint64, out *raft.Log) error {
-	return s.db.View(func(tx *bolt.Tx) error {
+func (s *BoltStore) GetLog(index uint64) (*raft.LogEntry, error) {
+	var out raft.LogEntry
+	err := s.db.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketLog).Get(uint64ToBytes(index))
 		if v == nil {
 			return raft.ErrLogNotFound
 		}
-		return json.Unmarshal(v, out)
+		return json.Unmarshal(v, &out)
 	})
+	return &out, err
 }
 
 // StoreLog stores a single log entry.
-func (s *BoltStore) StoreLog(log *raft.Log) error {
-	return s.StoreLogs([]*raft.Log{log})
+func (s *BoltStore) StoreLog(log *raft.LogEntry) error {
+	return s.StoreLogs([]*raft.LogEntry{log})
 }
 
 // StoreLogs stores multiple log entries in a single batch transaction.
-func (s *BoltStore) StoreLogs(logs []*raft.Log) error {
+func (s *BoltStore) StoreLogs(logs []*raft.LogEntry) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketLog)
 		for _, l := range logs {
