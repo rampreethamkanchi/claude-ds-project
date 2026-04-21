@@ -86,7 +86,9 @@ Choose **ONE** of these methods:
 2. **Start Node 2 & 3:**
    Ensure their `bootstrap` is `false`, then run the same command.
 3. **Open the Editor:**
-   Go to `http://YOUR_IP:8080` in a browser on any laptop.
+   Go to `http://YOUR_IP:8080` in a browser.
+   > [!TIP]
+   > The editor now **automatically detects** the laptop's IP address. You don't need to manually change the `ws://...` value in the browser anymore; it will default to the laptop you are currently accessing.
 
 ---
 

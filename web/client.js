@@ -802,3 +802,18 @@ function performRandomOp() {
   // Trigger input event for diffing.
   editor.dispatchEvent(new Event('input', { bubbles: true }));
 }
+
+// ── Initialization ───────────────────────────────────────────────
+
+window.onload = () => {
+  // Populate the server address input with the current host.
+  // Since the server acts as both the static file server and the WS server,
+  // window.location.host will correctly identify the laptop's IP and port.
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const defaultWs = `${protocol}//${window.location.host}/ws`;
+  const input = document.getElementById('server-input');
+  if (input) {
+    input.value = defaultWs;
+  }
+  log('info', `Client initialized. Default server: ${defaultWs}`);
+};

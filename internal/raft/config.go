@@ -50,14 +50,13 @@ type Config struct {
 // The caller MUST set ServerID, Peers, LogStore, StableStore, and FSM.
 func DefaultConfig() *Config {
 	return &Config{
-		// Heartbeat every 50ms — fast enough for localhost where RTT is <1ms.
-		HeartbeatInterval: 50 * time.Millisecond,
+		// Heartbeat every 150ms — safe for real networks/Wi-Fi where RTT varies.
+		HeartbeatInterval: 150 * time.Millisecond,
 
-		// Election timeout: random in [150ms, 300ms).
-		// The paper recommends broadcastTime << electionTimeout << MTBF.
-		// For localhost: broadcastTime ≈ 1ms, so 150-300ms is very safe.
-		ElectionTimeoutMin: 150 * time.Millisecond,
-		ElectionTimeoutMax: 300 * time.Millisecond,
+		// Election timeout: random in [1000ms, 2000ms).
+		// Higher values prevent "flapping" elections due to Wi-Fi jitter.
+		ElectionTimeoutMin: 1000 * time.Millisecond,
+		ElectionTimeoutMax: 2000 * time.Millisecond,
 	}
 }
 
