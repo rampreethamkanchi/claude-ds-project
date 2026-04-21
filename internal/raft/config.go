@@ -55,8 +55,8 @@ func DefaultConfig() *Config {
 
 		// Election timeout: random in [1000ms, 2000ms).
 		// Higher values prevent "flapping" elections due to Wi-Fi jitter.
-		ElectionTimeoutMin: 5000 * time.Millisecond,
-		ElectionTimeoutMax: 10000 * time.Millisecond,
+		ElectionTimeoutMin: 1000 * time.Millisecond,
+		ElectionTimeoutMax: 2000 * time.Millisecond,
 	}
 }
 
