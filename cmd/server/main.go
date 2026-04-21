@@ -3,13 +3,9 @@
 // Entry point for a cluster node.
 //
 // Usage:
-//   go run ./cmd/server \
-//     -id node-1 \
-//     -grpc-addr localhost:12000 \
-//     -ws-addr localhost:8080 \
-//     -data-dir ./data/node-1 \
-//     -peers localhost:12000,localhost:12001,localhost:12002 \
-//     -bootstrap
+//   go run ./cmd/server -config config.json
+//   or
+//   go run ./cmd/server -id node-1 -grpc-addr localhost:12000 ...
 //
 // For all nodes in a 3-node cluster, run three instances with different ports.
 // Only pass -bootstrap on the FIRST startup; remove it on subsequent restarts.
@@ -17,8 +13,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,8 +30,20 @@ import (
 	"distributed-editor/internal/server"
 )
 
+// Config defines the structure for our JSON configuration file.
+type Config struct {
+	NodeID    string   `json:"node_id"`
+	GRPCAddr  string   `json:"grpc_addr"`
+	WSAddr    string   `json:"ws_addr"`
+	DataDir   string   `json:"data_dir"`
+	Peers     []string `json:"peers"`
+	Bootstrap bool     `json:"bootstrap"`
+}
+
 func main() {
 	// ── Command-line flags ────────────────────────────────────────────────────
+	configPath := flag.String("config", "", "Path to configuration JSON file")
+
 	nodeID    := flag.String("id",        "node-1",             "Unique node ID")
 	grpcAddr  := flag.String("grpc-addr", "localhost:12000",    "gRPC (Raft transport) listen address")
 	wsAddr    := flag.String("ws-addr",   "localhost:8080",     "WebSocket (client) listen address")
@@ -44,9 +54,48 @@ func main() {
 
 	flag.Parse()
 
-	peers := strings.Split(*peersFlag, ",")
-	for i, p := range peers {
-		peers[i] = strings.TrimSpace(p)
+	var peers []string
+
+	// ── Load from config file if provided ─────────────────────────────────────
+	if *configPath != "" {
+		file, err := os.Open(*configPath)
+		if err != nil {
+			log.Fatalf("failed to open config file: %v", err)
+		}
+		defer file.Close()
+
+		var cfg Config
+		if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+			log.Fatalf("failed to decode config file: %v", err)
+		}
+
+		// Config file overrides defaults (if field is not empty)
+		if cfg.NodeID != "" {
+			*nodeID = cfg.NodeID
+		}
+		if cfg.GRPCAddr != "" {
+			*grpcAddr = cfg.GRPCAddr
+		}
+		if cfg.WSAddr != "" {
+			*wsAddr = cfg.WSAddr
+		}
+		if cfg.DataDir != "" {
+			*dataDir = cfg.DataDir
+		}
+		if len(cfg.Peers) > 0 {
+			peers = cfg.Peers
+		}
+		if cfg.Bootstrap {
+			*bootstrap = true
+		}
+	}
+
+	// ── Parse peers from flag if not loaded from config ───────────────────────
+	if len(peers) == 0 {
+		peers = strings.Split(*peersFlag, ",")
+		for i, p := range peers {
+			peers[i] = strings.TrimSpace(p)
+		}
 	}
 
 	// ── Structured logger ─────────────────────────────────────────────────────
@@ -65,8 +114,6 @@ func main() {
 	)
 
 	// ── Build the FSM ─────────────────────────────────────────────────────────
-	// The state machine always starts empty. If init-text is provided, the leader
-	// will propose it as an initial log entry so it replicates correctly to followers.
 	sm := fsm.NewDocumentStateMachine("", logger)
 
 	// ── Start Raft ────────────────────────────────────────────────────────────
@@ -84,15 +131,13 @@ func main() {
 	}
 	defer rn.Shutdown()
 
-	// If we are bootstrapping and have initial text, we must propose it as a Raft
-	// entry so followers receive it. We cannot just set it in the local FSM.
+	// If we are bootstrapping and have initial text, we must propose it.
 	if *bootstrap && *initText != "" {
 		go func() {
 			logger.Info("waiting to become leader to propose initial text...")
 			for !rn.IsLeader() {
 				time.Sleep(100 * time.Millisecond)
 			}
-			// Submit an insert changeset mapping length 0 to len(initText)
 			entry := fsm.RaftLogEntry{
 				ClientID:     "system-bootstrap",
 				SubmissionID: 1,
@@ -108,15 +153,10 @@ func main() {
 	}
 
 	// ── Build the server Node and HTTP mux ────────────────────────────────────
-	// wsLeaderAddr is filled with the WS address of the leader — we derive it
-	// from the gRPC address by replacing the port with the WS port offset.
-	// For this project we just pass our own WS address; the client re-resolves itself.
 	node := server.NewNode(rn, sm, *wsAddr, logger)
 
 	mux := http.NewServeMux()
-	// WebSocket endpoint — clients connect here.
 	mux.Handle("/ws", node)
-	// Simple health check endpoint.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		state := "follower"
 		if rn.IsLeader() {
@@ -125,7 +165,6 @@ func main() {
 		fmt.Fprintf(w, `{"node_id":%q,"raft_state":%q,"head_rev":%d}`,
 			*nodeID, state, sm.HeadRev())
 	})
-	// Serve the web client UI.
 	mux.Handle("/", http.FileServer(http.Dir("./web")))
 
 	httpSrv := &http.Server{
