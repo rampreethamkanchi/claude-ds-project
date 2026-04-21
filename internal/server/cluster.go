@@ -26,6 +26,11 @@ type RaftConfig struct {
 	Peers       []string // network addresses of ALL cluster nodes
 	Bootstrap   bool     // not strictly needed for our custom raft, but kept for compatibility
 	InitialText string   // initial document text (only used if bootstrapping)
+
+	// Timeouts for Wi-Fi stability
+	ElectionTimeoutMin time.Duration
+	ElectionTimeoutMax time.Duration
+	HeartbeatInterval  time.Duration
 }
 
 // RaftNode bundles the live Raft instance with its transport and stores.
@@ -68,15 +73,31 @@ func SetupRaft(cfg RaftConfig, stateMachine *fsm.DocumentStateMachine, logger *s
 	}
 
 	// ── Custom Raft Configuration ──────────────────────────────────────────
+	// Use values from cfg if provided, otherwise fallback to raft.DefaultConfig().
+	defaultRaftCfg := raft.DefaultConfig()
+
+	minTimeout := cfg.ElectionTimeoutMin
+	if minTimeout == 0 {
+		minTimeout = defaultRaftCfg.ElectionTimeoutMin
+	}
+	maxTimeout := cfg.ElectionTimeoutMax
+	if maxTimeout == 0 {
+		maxTimeout = defaultRaftCfg.ElectionTimeoutMax
+	}
+	hbInterval := cfg.HeartbeatInterval
+	if hbInterval == 0 {
+		hbInterval = defaultRaftCfg.HeartbeatInterval
+	}
+
 	raftCfg := &raft.Config{
 		ServerID:           cfg.BindAddr,
 		Peers:              peers,
 		LogStore:           boltStore,
 		StableStore:        boltStore,
 		FSM:                stateMachine,
-		ElectionTimeoutMin: 150 * time.Millisecond,
-		ElectionTimeoutMax: 300 * time.Millisecond,
-		HeartbeatInterval:  50 * time.Millisecond,
+		ElectionTimeoutMin: minTimeout,
+		ElectionTimeoutMax: maxTimeout,
+		HeartbeatInterval:  hbInterval,
 		Logger:             logger,
 	}
 

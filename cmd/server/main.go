@@ -38,6 +38,11 @@ type Config struct {
 	DataDir   string   `json:"data_dir"`
 	Peers     []string `json:"peers"`
 	Bootstrap bool     `json:"bootstrap"`
+
+	// Optional timeout overrides
+	ElectionMin string `json:"election_min"`
+	ElectionMax string `json:"election_max"`
+	Heartbeat   string `json:"heartbeat"`
 }
 
 func main() {
@@ -51,6 +56,11 @@ func main() {
 	peersFlag := flag.String("peers",     "localhost:12000",    "Comma-separated list of ALL peer gRPC addresses (including self)")
 	bootstrap := flag.Bool("bootstrap",   false,                "Bootstrap a new cluster (first startup only)")
 	initText  := flag.String("init-text", "",                   "Initial document text (only used with -bootstrap)")
+
+	// Timeouts
+	electionMin := flag.Duration("election-min", 0, "Minimum election timeout (e.g. 1000ms)")
+	electionMax := flag.Duration("election-max", 0, "Maximum election timeout (e.g. 2000ms)")
+	heartbeat   := flag.Duration("heartbeat",    0, "Heartbeat interval (e.g. 150ms)")
 
 	flag.Parse()
 
@@ -88,6 +98,20 @@ func main() {
 		if cfg.Bootstrap {
 			*bootstrap = true
 		}
+
+		// Durations from JSON
+		if cfg.ElectionMin != "" {
+			d, err := time.ParseDuration(cfg.ElectionMin)
+			if err == nil { *electionMin = d }
+		}
+		if cfg.ElectionMax != "" {
+			d, err := time.ParseDuration(cfg.ElectionMax)
+			if err == nil { *electionMax = d }
+		}
+		if cfg.Heartbeat != "" {
+			d, err := time.ParseDuration(cfg.Heartbeat)
+			if err == nil { *heartbeat = d }
+		}
 	}
 
 	// ── Parse peers from flag if not loaded from config ───────────────────────
@@ -123,6 +147,10 @@ func main() {
 		DataDir:   *dataDir,
 		Peers:     peers,
 		Bootstrap: *bootstrap,
+
+		ElectionTimeoutMin: *electionMin,
+		ElectionTimeoutMax: *electionMax,
+		HeartbeatInterval:  *heartbeat,
 	}
 	rn, err := server.SetupRaft(raftCfg, sm, logger)
 	if err != nil {

@@ -41,10 +41,6 @@ type TCPTransport struct {
 	listener  net.Listener // TCP listener for incoming connections
 	rpcCh     chan *RPC     // incoming RPCs are placed here for the Raft node
 
-	// Connection pool: reuse outgoing connections to peers.
-	connPool map[string]net.Conn
-	connMu   sync.Mutex
-
 	shutdownCh chan struct{}
 	shutdownMu sync.Mutex
 	shutdown   bool
@@ -64,7 +60,6 @@ func NewTCPTransport(bindAddr string, logger *slog.Logger) (*TCPTransport, error
 		localAddr:  bindAddr,
 		listener:   listener,
 		rpcCh:      make(chan *RPC, 256),
-		connPool:   make(map[string]net.Conn),
 		shutdownCh: make(chan struct{}),
 		logger:     logger,
 	}
@@ -91,23 +86,22 @@ func (t *TCPTransport) LocalAddr() string {
 
 // SendAppendEntries sends an AppendEntries RPC to the target server.
 func (t *TCPTransport) SendAppendEntries(target string, req *AppendEntriesRequest) (*AppendEntriesResponse, error) {
-	conn, err := t.getConn(target)
+	// For production/demo across laptops, we use a fresh connection for each RPC.
+	// This avoids interleaving bytes on pooled connections and handles jitter better.
+	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tcp_transport: dial %s: %w", target, err)
 	}
+	defer conn.Close()
 
 	// Encode and send the request.
 	if err := t.sendMessage(conn, msgAppendEntriesReq, req); err != nil {
-		t.removeConn(target)
-		conn.Close()
 		return nil, fmt.Errorf("send AppendEntries to %s: %w", target, err)
 	}
 
 	// Read the response.
 	var resp AppendEntriesResponse
 	if err := t.readMessage(conn, msgAppendEntriesResp, &resp); err != nil {
-		t.removeConn(target)
-		conn.Close()
 		return nil, fmt.Errorf("read AppendEntries response from %s: %w", target, err)
 	}
 
@@ -116,55 +110,22 @@ func (t *TCPTransport) SendAppendEntries(target string, req *AppendEntriesReques
 
 // SendRequestVote sends a RequestVote RPC to the target server.
 func (t *TCPTransport) SendRequestVote(target string, req *RequestVoteRequest) (*RequestVoteResponse, error) {
-	conn, err := t.getConn(target)
+	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("tcp_transport: dial %s: %w", target, err)
 	}
+	defer conn.Close()
 
 	if err := t.sendMessage(conn, msgRequestVoteReq, req); err != nil {
-		t.removeConn(target)
-		conn.Close()
 		return nil, fmt.Errorf("send RequestVote to %s: %w", target, err)
 	}
 
 	var resp RequestVoteResponse
 	if err := t.readMessage(conn, msgRequestVoteResp, &resp); err != nil {
-		t.removeConn(target)
-		conn.Close()
 		return nil, fmt.Errorf("read RequestVote response from %s: %w", target, err)
 	}
 
 	return &resp, nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Connection pool
-// ─────────────────────────────────────────────────────────────────────────────
-
-// getConn returns a cached connection to the target, or creates a new one.
-func (t *TCPTransport) getConn(target string) (net.Conn, error) {
-	t.connMu.Lock()
-	defer t.connMu.Unlock()
-
-	if conn, ok := t.connPool[target]; ok {
-		return conn, nil
-	}
-
-	// Dial with a timeout to avoid blocking forever.
-	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("tcp_transport: dial %s: %w", target, err)
-	}
-
-	t.connPool[target] = conn
-	return conn, nil
-}
-
-// removeConn removes a connection from the pool (e.g., after an error).
-func (t *TCPTransport) removeConn(target string) {
-	t.connMu.Lock()
-	defer t.connMu.Unlock()
-	delete(t.connPool, target)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,6 +155,9 @@ func (t *TCPTransport) acceptLoop() {
 func (t *TCPTransport) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// Set a read deadline for the first header to avoid hanging goroutines.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
 	for {
 		// Read the message header: [1 byte type][4 bytes length]
 		header := make([]byte, 5)
@@ -203,11 +167,19 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 
 		msgType := header[0]
 		payloadLen := binary.BigEndian.Uint32(header[1:5])
+
+		// Security/Sanity check: avoid massive allocations.
+		if payloadLen > 10*1024*1024 { // 10MB limit
+			t.logger.Warn("tcp_transport: payload too large", "len", payloadLen)
+			return
+		}
+
 		payload := make([]byte, payloadLen)
 		if _, err := io.ReadFull(conn, payload); err != nil {
 			return
 		}
 
+		// Process based on type.
 		switch msgType {
 		case msgAppendEntriesReq:
 			var req AppendEntriesRequest
@@ -215,13 +187,19 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 				t.logger.Warn("tcp_transport: unmarshal AppendEntries", "err", err)
 				return
 			}
-			// Send the RPC to the Raft node and wait for the response.
 			respCh := make(chan RPCResponse, 1)
 			t.rpcCh <- &RPC{Command: &req, RespCh: respCh}
-			rpcResp := <-respCh
-
-			// Send the response back on the same connection.
-			if err := t.sendMessage(conn, msgAppendEntriesResp, rpcResp.Response); err != nil {
+			
+			// Wait for Raft node to process.
+			select {
+			case rpcResp := <-respCh:
+				if err := t.sendMessage(conn, msgAppendEntriesResp, rpcResp.Response); err != nil {
+					return
+				}
+			case <-time.After(10 * time.Second):
+				t.logger.Warn("tcp_transport: Raft node processing timeout (AppendEntries)")
+				return
+			case <-t.shutdownCh:
 				return
 			}
 
@@ -233,9 +211,16 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 			}
 			respCh := make(chan RPCResponse, 1)
 			t.rpcCh <- &RPC{Command: &req, RespCh: respCh}
-			rpcResp := <-respCh
-
-			if err := t.sendMessage(conn, msgRequestVoteResp, rpcResp.Response); err != nil {
+			
+			select {
+			case rpcResp := <-respCh:
+				if err := t.sendMessage(conn, msgRequestVoteResp, rpcResp.Response); err != nil {
+					return
+				}
+			case <-time.After(10 * time.Second):
+				t.logger.Warn("tcp_transport: Raft node processing timeout (RequestVote)")
+				return
+			case <-t.shutdownCh:
 				return
 			}
 
@@ -243,6 +228,9 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 			t.logger.Warn("tcp_transport: unknown message type", "type", msgType)
 			return
 		}
+		
+		// Reset deadline for next message in case of pipelining (though we don't currently pipeline).
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	}
 }
 
@@ -251,26 +239,25 @@ func (t *TCPTransport) handleConnection(conn net.Conn) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // sendMessage encodes and sends a framed JSON message.
+// Critically, it buffers the header and payload together to ensure atomic delivery.
 func (t *TCPTransport) sendMessage(conn net.Conn, msgType byte, payload interface{}) error {
-	data, err := json.Marshal(payload)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	// Set a write deadline to avoid blocking forever.
+	// Buffer header + body into one slice for a single Write call.
+	// This prevents interleaving if multiple goroutines accidentally share a connection.
+	msg := make([]byte, 5+len(body))
+	msg[0] = msgType
+	binary.BigEndian.PutUint32(msg[1:5], uint32(len(body)))
+	copy(msg[5:], body)
+
+	// Set a write deadline.
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-
-	// Write header: [1 byte type][4 bytes big-endian length]
-	header := make([]byte, 5)
-	header[0] = msgType
-	binary.BigEndian.PutUint32(header[1:5], uint32(len(data)))
-	if _, err := conn.Write(header); err != nil {
-		return err
-	}
-
-	// Write payload.
-	if _, err := conn.Write(data); err != nil {
-		return err
+	
+	if _, err := conn.Write(msg); err != nil {
+		return fmt.Errorf("write message: %w", err)
 	}
 
 	return nil
@@ -289,10 +276,16 @@ func (t *TCPTransport) readMessage(conn net.Conn, expectedType byte, out interfa
 
 	msgType := header[0]
 	if msgType != expectedType {
+		// This is where "expected type X, got Y" errors come from.
+		// Usually indicates a framing mismatch or a stale connection buffer.
 		return fmt.Errorf("expected message type %d, got %d", expectedType, msgType)
 	}
 
 	payloadLen := binary.BigEndian.Uint32(header[1:5])
+	if payloadLen > 10*1024*1024 {
+		return fmt.Errorf("payload too large: %d", payloadLen)
+	}
+
 	payload := make([]byte, payloadLen)
 	if _, err := io.ReadFull(conn, payload); err != nil {
 		return fmt.Errorf("read payload: %w", err)
@@ -305,7 +298,7 @@ func (t *TCPTransport) readMessage(conn net.Conn, expectedType byte, out interfa
 // Shutdown
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Shutdown stops the transport, closing the listener and all pooled connections.
+// Shutdown stops the transport, closing the listener.
 func (t *TCPTransport) Shutdown() error {
 	t.shutdownMu.Lock()
 	defer t.shutdownMu.Unlock()
@@ -318,14 +311,6 @@ func (t *TCPTransport) Shutdown() error {
 
 	// Close the listener so acceptLoop returns.
 	t.listener.Close()
-
-	// Close all pooled connections.
-	t.connMu.Lock()
-	for addr, conn := range t.connPool {
-		conn.Close()
-		delete(t.connPool, addr)
-	}
-	t.connMu.Unlock()
 
 	return nil
 }
